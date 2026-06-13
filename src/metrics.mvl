@@ -1,0 +1,93 @@
+// pkg.metrics — counters, gauges, and histograms with effect tracking.
+//
+// Part of MVL's observability triangle: logs (std.log), metrics (here), trace (pkg.trace).
+//
+// Import:
+//   use pkg.metrics.{counter_inc, counter_add, gauge_set, gauge_inc, gauge_dec,
+//                    histogram_observe, histogram_time}
+//
+// Effects: ! Metric (all emit functions).
+//
+// See #805.
+
+// ── Metric Types ──────────────────────────────────────────────────────────────
+
+/// Counter: monotonically increasing value.
+/// Use for: request counts, error counts, bytes transferred.
+pub type Counter = struct {
+    name: String,
+    tags: Map[String, String],
+    value: Int,
+}
+
+/// Gauge: value that can go up or down.
+/// Use for: connections active, queue depth, temperature.
+pub type Gauge = struct {
+    name: String,
+    tags: Map[String, String],
+    value: Float,
+}
+
+/// Histogram bucket boundary.
+pub type Bucket = struct {
+    le: Float,      // less-than-or-equal boundary
+    count: Int,
+}
+
+/// Histogram: distribution of observed values.
+/// Use for: request duration, response size.
+pub type Histogram = struct {
+    name: String,
+    tags: Map[String, String],
+    buckets: List[Bucket],
+    sum: Float,
+    count: Int,
+}
+
+// ── Counter operations ────────────────────────────────────────────────────────
+
+/// Increment a counter by 1.
+pub builtin fn counter_inc(name: String, tags: Map[String, String]) -> Unit ! Metric
+
+/// Increment a counter by n.
+pub builtin fn counter_add(name: String, n: Int, tags: Map[String, String]) -> Unit ! Metric
+
+// ── Gauge operations ──────────────────────────────────────────────────────────
+
+/// Set a gauge to a specific value.
+pub builtin fn gauge_set(name: String, value: Float, tags: Map[String, String]) -> Unit ! Metric
+
+/// Increment a gauge by delta.
+pub builtin fn gauge_inc(name: String, delta: Float, tags: Map[String, String]) -> Unit ! Metric
+
+/// Decrement a gauge by delta.
+pub builtin fn gauge_dec(name: String, delta: Float, tags: Map[String, String]) -> Unit ! Metric
+
+// ── Histogram operations ──────────────────────────────────────────────────────
+
+/// Record a value in a histogram.
+pub builtin fn histogram_observe(name: String, value: Float, tags: Map[String, String]) -> Unit ! Metric
+
+/// Time a function and record the duration in a histogram.
+/// Duration is in milliseconds.
+pub builtin fn histogram_time[T, E](
+    name: String,
+    tags: Map[String, String],
+    f: fn() -> T ! E
+) -> T ! E + Metric
+
+// ── Export ────────────────────────────────────────────────────────────────────
+
+/// Start a Prometheus metrics exporter on the given address.
+/// Metrics will be available at `http://{addr}/metrics`.
+pub builtin fn start_prometheus_exporter(addr: String) -> Result[Unit, String] ! Net + Metric
+
+// ── Naming conventions ────────────────────────────────────────────────────────
+//
+// Follow Prometheus conventions:
+//   - Snake_case: http_requests_total
+//   - Unit suffix: _seconds, _bytes, _total
+//   - Static names: variation via tags, not metric name
+//
+// Good: counter_inc("http_requests_total", { "method": "GET", "status": "200" })
+// Bad:  counter_inc("http_requests_" + method, {})  // Dynamic name
