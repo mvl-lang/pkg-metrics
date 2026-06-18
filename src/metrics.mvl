@@ -8,6 +8,10 @@
 //
 // Effects: ! Metric (all emit functions).
 //
+// All functions in this package are builtin fn. The MVL compiler treats builtin fn
+// as implicitly total — `total` and `partial` qualifiers are not permitted on builtins.
+// See .openspec/adr/0002-totality-ffi-policy.md for the termination argument.
+//
 // See #805.
 
 // ── Metric Types ──────────────────────────────────────────────────────────────
@@ -47,29 +51,37 @@ pub type Histogram = struct {
 // ── Counter operations ────────────────────────────────────────────────────────
 
 /// Increment a counter by 1.
+/// Builtin: implicitly total (O(1) atomic increment, no loops).
 pub builtin fn counter_inc(name: String, tags: Map[String, String]) -> Unit ! Metric
 
 /// Increment a counter by n.
+/// Builtin: implicitly total (O(1) atomic increment, no loops).
 pub builtin fn counter_add(name: String, n: Int, tags: Map[String, String]) -> Unit ! Metric
 
 // ── Gauge operations ──────────────────────────────────────────────────────────
 
 /// Set a gauge to a specific value.
+/// Builtin: implicitly total (O(1) atomic write).
 pub builtin fn gauge_set(name: String, value: Float, tags: Map[String, String]) -> Unit ! Metric
 
 /// Increment a gauge by delta.
+/// Builtin: implicitly total (O(1) atomic read-modify-write).
 pub builtin fn gauge_inc(name: String, delta: Float, tags: Map[String, String]) -> Unit ! Metric
 
 /// Decrement a gauge by delta.
+/// Builtin: implicitly total (O(1) atomic read-modify-write).
 pub builtin fn gauge_dec(name: String, delta: Float, tags: Map[String, String]) -> Unit ! Metric
 
 // ── Histogram operations ──────────────────────────────────────────────────────
 
 /// Record a value in a histogram.
+/// Builtin: implicitly total (bounded bucket scan + atomic increment).
 pub builtin fn histogram_observe(name: String, value: Float, tags: Map[String, String]) -> Unit ! Metric
 
 /// Time a function and record the duration in a histogram.
 /// Duration is in milliseconds.
+/// Builtin: implicitly total for the wrapper (calls f once, records monotonic clock delta).
+/// The totality of f is the caller's responsibility.
 pub builtin fn histogram_time[T, E](
     name: String,
     tags: Map[String, String],
@@ -80,6 +92,7 @@ pub builtin fn histogram_time[T, E](
 
 /// Start a Prometheus metrics exporter on the given address.
 /// Metrics will be available at `http://{addr}/metrics`.
+/// Builtin: implicitly total (binds socket and spawns background thread; call returns O(1)).
 pub builtin fn start_prometheus_exporter(addr: String) -> Result[Unit, String] ! Net + Metric
 
 // ── Naming conventions ────────────────────────────────────────────────────────
