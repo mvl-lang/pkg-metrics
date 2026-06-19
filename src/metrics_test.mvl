@@ -1,0 +1,176 @@
+// pkg.metrics tests — unit tests for metric types and construction.
+//
+// Note: Actual metric emission (counter_inc, gauge_set, etc.) are builtins
+// that write to the Prometheus registry. These tests validate the pure MVL
+// types and their construction.
+//
+// Type re-declarations: workaround for #96 (inter-package import in test context).
+// Keep in sync with metrics.mvl.
+
+// ── Type re-declarations (workaround: #96) ────────────────────────────────────
+
+type Counter = struct {
+    name: String,
+    tags: Map[String, String],
+    value: Int,
+}
+
+type Gauge = struct {
+    name: String,
+    tags: Map[String, String],
+    value: Float,
+}
+
+type Bucket = struct {
+    le: Float,
+    count: Int,
+}
+
+type Histogram = struct {
+    name: String,
+    tags: Map[String, String],
+    buckets: List[Bucket],
+    sum: Float,
+    count: Int,
+}
+
+// ── Counter tests ─────────────────────────────────────────────────────────────
+
+test fn counter_construction() -> Unit {
+    let tags: Map[String, String] = {"method": "GET", "status": "200"};
+    let c: Counter = Counter { name: "http_requests_total", tags: tags, value: 0 };
+    assert_eq(c.name, "http_requests_total");
+    assert_eq(c.value, 0)
+}
+
+test fn counter_name_follows_convention() -> Unit {
+    let c: Counter = Counter { name: "http_requests_total", tags: {"_": "_"}, value: 42 };
+    assert(c.name.ends_with("_total"))
+}
+
+test fn counter_value_is_non_negative() -> Unit {
+    let c: Counter = Counter { name: "errors_total", tags: {"_": "_"}, value: 100 };
+    assert(c.value >= 0)
+}
+
+test fn counter_with_multiple_tags() -> Unit {
+    let tags: Map[String, String] = {"method": "POST", "status": "201", "handler": "create_user"};
+    let c: Counter = Counter { name: "api_calls_total", tags: tags, value: 5 };
+    assert_eq(c.tags.get("method"), Some("POST"));
+    assert_eq(c.tags.get("status"), Some("201"));
+    assert_eq(c.tags.get("handler"), Some("create_user"))
+}
+
+// ── Gauge tests ───────────────────────────────────────────────────────────────
+
+test fn gauge_construction() -> Unit {
+    let g: Gauge = Gauge { name: "connections_active", tags: {"_": "_"}, value: 5.0 };
+    assert_eq(g.name, "connections_active");
+    assert_eq(g.value, 5.0)
+}
+
+test fn gauge_can_be_negative() -> Unit {
+    let g: Gauge = Gauge { name: "temperature_celsius", tags: {"_": "_"}, value: -10.5 };
+    assert(g.value < 0.0)
+}
+
+test fn gauge_with_tags() -> Unit {
+    let tags: Map[String, String] = {"instance": "web-1", "region": "eu-west"};
+    let g: Gauge = Gauge { name: "queue_depth", tags: tags, value: 42.0 };
+    assert_eq(g.tags.get("instance"), Some("web-1"));
+    assert_eq(g.tags.get("region"), Some("eu-west"))
+}
+
+test fn gauge_zero_value() -> Unit {
+    let g: Gauge = Gauge { name: "idle_workers", tags: {"_": "_"}, value: 0.0 };
+    assert_eq(g.value, 0.0)
+}
+
+// ── Bucket tests ──────────────────────────────────────────────────────────────
+
+test fn bucket_construction() -> Unit {
+    let b: Bucket = Bucket { le: 0.1, count: 50 };
+    assert_eq(b.le, 0.1);
+    assert_eq(b.count, 50)
+}
+
+test fn bucket_le_boundary() -> Unit {
+    let b: Bucket = Bucket { le: 1.0, count: 100 };
+    assert_eq(b.le, 1.0)
+}
+
+test fn bucket_zero_count() -> Unit {
+    let b: Bucket = Bucket { le: 0.001, count: 0 };
+    assert_eq(b.count, 0)
+}
+
+// ── Histogram tests ───────────────────────────────────────────────────────────
+
+test fn histogram_construction() -> Unit {
+    let buckets: List[Bucket] = [
+        Bucket { le: 0.005, count: 10 },
+        Bucket { le: 0.01, count: 25 },
+        Bucket { le: 0.025, count: 50 },
+    ];
+    let h: Histogram = Histogram {
+        name: "http_request_duration_seconds",
+        tags: {"_": "_"},
+        buckets: buckets,
+        sum: 12.5,
+        count: 100,
+    };
+    assert_eq(h.name, "http_request_duration_seconds");
+    assert_eq(h.count, 100);
+    assert_eq(h.sum, 12.5)
+}
+
+test fn histogram_name_has_unit_suffix() -> Unit {
+    let h: Histogram = Histogram {
+        name: "response_size_bytes",
+        tags: {"_": "_"},
+        buckets: [],
+        sum: 0.0,
+        count: 0,
+    };
+    assert(h.name.ends_with("_bytes"))
+}
+
+test fn histogram_empty_buckets() -> Unit {
+    let h: Histogram = Histogram {
+        name: "latency_seconds",
+        tags: {"_": "_"},
+        buckets: [],
+        sum: 0.0,
+        count: 0,
+    };
+    assert_eq(h.buckets.len(), 0)
+}
+
+test fn histogram_buckets_ordered() -> Unit {
+    let buckets: List[Bucket] = [
+        Bucket { le: 0.1, count: 10 },
+        Bucket { le: 0.5, count: 30 },
+        Bucket { le: 1.0, count: 50 },
+    ];
+    let first: Bucket = match buckets.get(0) {
+        Some(b) => b,
+        None => Bucket { le: 0.0, count: 0 },
+    };
+    let last: Bucket = match buckets.get(2) {
+        Some(b) => b,
+        None => Bucket { le: 0.0, count: 0 },
+    };
+    assert(first.le < last.le)
+}
+
+test fn histogram_sum_and_count() -> Unit {
+    let h: Histogram = Histogram {
+        name: "request_duration_seconds",
+        tags: {"_": "_"},
+        buckets: [],
+        sum: 123.456,
+        count: 1000,
+    };
+    assert_eq(h.sum, 123.456);
+    assert_eq(h.count, 1000)
+}
