@@ -14,8 +14,12 @@
 //
 // See #805.
 
-// ── Metric Types ──────────────────────────────────────────────────────────────
+// ── Effect declaration ────────────────────────────────────────────────────────
+/// The Metric effect — required by all metric emission functions.
+/// Subsumes no other effects (metrics are side-effects unto themselves).
+pub effect Metric
 
+// ── Metric Types ──────────────────────────────────────────────────────────────
 /// Counter: monotonically increasing value.
 /// Use for: request counts, error counts, bytes transferred.
 pub type Counter = struct {
@@ -34,7 +38,7 @@ pub type Gauge = struct {
 
 /// Histogram bucket boundary.
 pub type Bucket = struct {
-    le: Float,      // less-than-or-equal boundary
+    le: Float,
     count: Int,
 }
 
@@ -49,7 +53,6 @@ pub type Histogram = struct {
 }
 
 // ── Counter operations ────────────────────────────────────────────────────────
-
 /// Increment a counter by 1.
 /// Builtin: implicitly total (O(1) atomic increment, no loops).
 pub builtin fn counter_inc(name: String, tags: Map[String, String]) -> Unit ! Metric
@@ -59,7 +62,6 @@ pub builtin fn counter_inc(name: String, tags: Map[String, String]) -> Unit ! Me
 pub builtin fn counter_add(name: String, n: Int, tags: Map[String, String]) -> Unit ! Metric
 
 // ── Gauge operations ──────────────────────────────────────────────────────────
-
 /// Set a gauge to a specific value.
 /// Builtin: implicitly total (O(1) atomic write).
 pub builtin fn gauge_set(name: String, value: Float, tags: Map[String, String]) -> Unit ! Metric
@@ -73,7 +75,6 @@ pub builtin fn gauge_inc(name: String, delta: Float, tags: Map[String, String]) 
 pub builtin fn gauge_dec(name: String, delta: Float, tags: Map[String, String]) -> Unit ! Metric
 
 // ── Histogram operations ──────────────────────────────────────────────────────
-
 /// Record a value in a histogram.
 /// Builtin: implicitly total (bounded bucket scan + atomic increment).
 pub builtin fn histogram_observe(name: String, value: Float, tags: Map[String, String]) -> Unit ! Metric
@@ -82,19 +83,13 @@ pub builtin fn histogram_observe(name: String, value: Float, tags: Map[String, S
 /// Duration is in milliseconds.
 /// Builtin: implicitly total for the wrapper (calls f once, records monotonic clock delta).
 /// The totality of f is the caller's responsibility.
-pub builtin fn histogram_time[T, E](
-    name: String,
-    tags: Map[String, String],
-    f: fn() -> T ! E
-) -> T ! E + Metric
+pub builtin fn histogram_time[T, E](name: String, tags: Map[String, String], f: fn() -> T ! E) -> T ! E + Metric
 
 // ── Export ────────────────────────────────────────────────────────────────────
-
 /// Start a Prometheus metrics exporter on the given address.
 /// Metrics will be available at `http://{addr}/metrics`.
 /// Builtin: implicitly total (binds socket and spawns background thread; call returns O(1)).
 pub builtin fn start_prometheus_exporter(addr: String) -> Result[Unit, String] ! Net + Metric
-
 // ── Naming conventions ────────────────────────────────────────────────────────
 //
 // Follow Prometheus conventions:

@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.2.1] - 2026-06-20
+
+### Fixed
+- Declare `pub effect Metric` — was used but never declared, causing downstream packages that subsume it to fail with "unknown effect" errors
+
 ## [0.2.0] - 2026-06-18
 
 ### Added
