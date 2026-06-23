@@ -332,8 +332,6 @@ pub partial fn start_prometheus_exporter(
                     },
                 }
             }
-            tcp_close_listener(listener);
-            Ok(())
         },
     }
 }
