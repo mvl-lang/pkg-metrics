@@ -169,29 +169,29 @@ total fn format_prometheus(
     }
     let hist_keys: List[String] = histograms.keys().sort();
     for key in hist_keys {
-        match histograms.get(key) {
-            None => {},
-            Some(h) => {
-                for b in h.buckets {
-                    result = result
-                        .concat(h.name).concat("_bucket")
-                        .concat(bucket_labels(h.tags, b.le.to_string()))
-                        .concat(" ").concat(b.count.to_string()).concat("\n")
-                }
-                result = result
-                    .concat(h.name).concat("_bucket")
-                    .concat(bucket_labels(h.tags, "+Inf"))
-                    .concat(" ").concat(h.count.to_string()).concat("\n");
-                result = result
-                    .concat(h.name).concat("_sum")
-                    .concat(standard_labels(h.tags))
-                    .concat(" ").concat(h.sum.to_string()).concat("\n");
-                result = result
-                    .concat(h.name).concat("_count")
-                    .concat(standard_labels(h.tags))
-                    .concat(" ").concat(h.count.to_string()).concat("\n")
-            },
+        // key comes from histograms.keys() so get() always returns Some; the
+        // empty default is never used but satisfies the type checker.
+        let h: Histogram = histograms.get(key).unwrap_or(Histogram {
+            name: "", tags: Map::new(), buckets: [], sum: 0.0, count: 0,
+        });
+        for b in h.buckets {
+            result = result
+                .concat(h.name).concat("_bucket")
+                .concat(bucket_labels(h.tags, b.le.to_string()))
+                .concat(" ").concat(b.count.to_string()).concat("\n")
         }
+        result = result
+            .concat(h.name).concat("_bucket")
+            .concat(bucket_labels(h.tags, "+Inf"))
+            .concat(" ").concat(h.count.to_string()).concat("\n");
+        result = result
+            .concat(h.name).concat("_sum")
+            .concat(standard_labels(h.tags))
+            .concat(" ").concat(h.sum.to_string()).concat("\n");
+        result = result
+            .concat(h.name).concat("_count")
+            .concat(standard_labels(h.tags))
+            .concat(" ").concat(h.count.to_string()).concat("\n")
     }
     result
 }
