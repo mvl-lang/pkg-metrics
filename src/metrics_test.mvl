@@ -1,11 +1,13 @@
-// pkg.metrics tests — unit tests for metric types and construction.
+// pkg.metrics tests
 //
-// Note: Actual metric emission (counter_inc, gauge_set, etc.) are builtins
-// that write to the Prometheus registry. These tests validate the pure MVL
-// types and their construction.
+// Tests cover the pure MVL types and the metric_key encoding.
+// Actor behaviors (counter_inc, gauge_set, etc.) are fire-and-forget and
+// cannot be asserted synchronously — integration tests live in crud_api.
 //
-// Type re-declarations: workaround for #96 (inter-package import in test context).
-// Keep in sync with metrics.mvl.
+// Note: type re-declarations are a workaround for #96 (inter-package import
+// in test context). Keep in sync with metrics.mvl.
+
+use std.collections.{Map}
 
 // ── Type re-declarations (workaround: #96) ────────────────────────────────────
 
@@ -34,7 +36,57 @@ type Histogram = struct {
     count: Int,
 }
 
-// ── Counter tests ─────────────────────────────────────────────────────────────
+// ── metric_key encoding ───────────────────────────────────────────────────────
+//
+// Inline the key-encoding logic here (same workaround as types above).
+
+fn metric_key(name: String, tags: Map[String, String]) -> String {
+    if tags.is_empty() {
+        name
+    } else {
+        let keys: List[String] = tags.keys().sort();
+        let result: ref String = name.concat("{");
+        let first: ref Bool = true;
+        for k in keys {
+            let v: String = tags.get(k).unwrap_or("");
+            let sep: String = if first { "" } else { "," };
+            result = result.concat(sep).concat(k).concat("=\"").concat(v).concat("\"");
+            first = false
+        }
+        result.concat("}")
+    }
+}
+
+// ── metric_key tests ──────────────────────────────────────────────────────────
+
+test fn key_no_tags() -> Unit {
+    let no_tags: Map[String, String] = Map::new();
+    assert_eq(metric_key("http_requests_total", no_tags), "http_requests_total")
+}
+
+test fn key_single_tag() -> Unit {
+    assert_eq(
+        metric_key("http_requests_total", {"method": "GET"}),
+        "http_requests_total{method=\"GET\"}"
+    )
+}
+
+test fn key_tags_sorted() -> Unit {
+    // Tags must come out in sorted key order regardless of insertion order.
+    assert_eq(
+        metric_key("req", {"status": "200", "method": "GET"}),
+        "req{method=\"GET\",status=\"200\"}"
+    )
+}
+
+test fn key_three_tags_sorted() -> Unit {
+    assert_eq(
+        metric_key("api_calls_total", {"handler": "create_user", "method": "POST", "status": "201"}),
+        "api_calls_total{handler=\"create_user\",method=\"POST\",status=\"201\"}"
+    )
+}
+
+// ── Counter type tests ────────────────────────────────────────────────────────
 
 test fn counter_construction() -> Unit {
     let tags: Map[String, String] = {"method": "GET", "status": "200"};
@@ -61,7 +113,7 @@ test fn counter_with_multiple_tags() -> Unit {
     assert_eq(c.tags.get("handler"), Some("create_user"))
 }
 
-// ── Gauge tests ───────────────────────────────────────────────────────────────
+// ── Gauge type tests ──────────────────────────────────────────────────────────
 
 test fn gauge_construction() -> Unit {
     let g: Gauge = Gauge { name: "connections_active", tags: {"_": "_"}, value: 5.0 };
@@ -86,7 +138,7 @@ test fn gauge_zero_value() -> Unit {
     assert_eq(g.value, 0.0)
 }
 
-// ── Bucket tests ──────────────────────────────────────────────────────────────
+// ── Bucket type tests ─────────────────────────────────────────────────────────
 
 test fn bucket_construction() -> Unit {
     let b: Bucket = Bucket { le: 0.1, count: 50 };
@@ -104,20 +156,20 @@ test fn bucket_zero_count() -> Unit {
     assert_eq(b.count, 0)
 }
 
-// ── Histogram tests ───────────────────────────────────────────────────────────
+// ── Histogram type tests ──────────────────────────────────────────────────────
 
 test fn histogram_construction() -> Unit {
     let buckets: List[Bucket] = [
         Bucket { le: 0.005, count: 10 },
-        Bucket { le: 0.01, count: 25 },
+        Bucket { le: 0.01,  count: 25 },
         Bucket { le: 0.025, count: 50 },
     ];
     let h: Histogram = Histogram {
-        name: "http_request_duration_seconds",
-        tags: {"_": "_"},
+        name:    "http_request_duration_seconds",
+        tags:    {"_": "_"},
         buckets: buckets,
-        sum: 12.5,
-        count: 100,
+        sum:     12.5,
+        count:   100,
     };
     assert_eq(h.name, "http_request_duration_seconds");
     assert_eq(h.count, 100);
@@ -126,22 +178,14 @@ test fn histogram_construction() -> Unit {
 
 test fn histogram_name_has_unit_suffix() -> Unit {
     let h: Histogram = Histogram {
-        name: "response_size_bytes",
-        tags: {"_": "_"},
-        buckets: [],
-        sum: 0.0,
-        count: 0,
+        name: "response_size_bytes", tags: {"_": "_"}, buckets: [], sum: 0.0, count: 0,
     };
     assert(h.name.ends_with("_bytes"))
 }
 
 test fn histogram_empty_buckets() -> Unit {
     let h: Histogram = Histogram {
-        name: "latency_seconds",
-        tags: {"_": "_"},
-        buckets: [],
-        sum: 0.0,
-        count: 0,
+        name: "latency_seconds", tags: {"_": "_"}, buckets: [], sum: 0.0, count: 0,
     };
     assert_eq(h.buckets.len(), 0)
 }
@@ -154,22 +198,19 @@ test fn histogram_buckets_ordered() -> Unit {
     ];
     let first: Bucket = match buckets.get(0) {
         Some(b) => b,
-        None => Bucket { le: 0.0, count: 0 },
+        None    => Bucket { le: 0.0, count: 0 },
     };
     let last: Bucket = match buckets.get(2) {
         Some(b) => b,
-        None => Bucket { le: 0.0, count: 0 },
+        None    => Bucket { le: 0.0, count: 0 },
     };
     assert(first.le < last.le)
 }
 
 test fn histogram_sum_and_count() -> Unit {
     let h: Histogram = Histogram {
-        name: "request_duration_seconds",
-        tags: {"_": "_"},
-        buckets: [],
-        sum: 123.456,
-        count: 1000,
+        name: "request_duration_seconds", tags: {"_": "_"}, buckets: [],
+        sum: 123.456, count: 1000,
     };
     assert_eq(h.sum, 123.456);
     assert_eq(h.count, 1000)

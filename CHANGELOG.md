@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.3.0] - 2026-06-23
+
+### Changed
+- **Breaking**: replaced `builtin fn` free functions with an actor-based pure MVL implementation (#3)
+  - `pub actor Metrics` — registry actor holding all metric state
+  - `new_metrics() -> Metrics ! Spawn` — explicit constructor, call once at startup
+  - All emit operations are now actor behaviors called as `metrics.counter_inc(...)` etc.
+  - `histogram_time` and `start_prometheus_exporter` are now free functions taking `Metrics` as first argument
+  - `pub effect Metric > Send + Clock` — subsumes actor messaging and clock effects
+- `start_prometheus_exporter` now takes `(metrics, host, port)` instead of `addr: String`; returns `Result[Unit, NetError]`
+- `histogram_time` now takes `metrics` as first argument; duration measured via `std.time.elapsed_ms`
+- Prometheus exporter implemented in pure MVL using `std.net`; serves `GET /metrics`, returns 404 otherwise
+
+### Added
+- `with mailbox(unbounded)` on the registry actor — prevents backpressure drops under high metric volume
+- Causal consistency: scrape responses are formatted after all prior emit messages in the mailbox
+
+### Requires
+- `std.time.elapsed_ms` — added to the MVL stdlib alongside this release
+
 ## [0.2.1] - 2026-06-20
 
 ### Fixed

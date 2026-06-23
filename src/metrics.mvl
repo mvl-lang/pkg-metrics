@@ -1,25 +1,32 @@
-// pkg.metrics — counters, gauges, and histograms with effect tracking.
-//
-// Part of MVL's observability triangle: logs (std.log), metrics (here), trace (pkg.trace).
-//
-// Import:
-//   use pkg.metrics.{counter_inc, counter_add, gauge_set, gauge_inc, gauge_dec,
-//                    histogram_observe, histogram_time}
-//
-// Effects: ! Metric (all emit functions).
-//
-// All functions in this package are builtin fn. The MVL compiler treats builtin fn
-// as implicitly total — `total` and `partial` qualifiers are not permitted on builtins.
-// See .openspec/adr/0002-totality-ffi-policy.md for the termination argument.
-//
-// See #805.
+//! pkg.metrics — counters, gauges, and histograms with effect tracking.
+//!
+//! Pure MVL. Actor-backed registry; follows the std.log pattern: construct a
+//! Metrics handle with new_metrics() and pass it explicitly through the call
+//! graph. No Rust bridge required.
+//!
+//! Import:
+//!   use pkg.metrics.{Metrics, new_metrics,
+//!                    histogram_time, start_prometheus_exporter}
+//!
+//! Effects:
+//!   Metric > Send + Clock — all emit behaviors (callers declare only ! Metric).
+//!   Spawn                 — new_metrics() only.
+//!   Net + Metric          — start_prometheus_exporter only.
+//!
+//! See #3, ADR-0001.
 
-// ── Effect declaration ────────────────────────────────────────────────────────
-/// The Metric effect — required by all metric emission functions.
-/// Subsumes no other effects (metrics are side-effects unto themselves).
-pub effect Metric
+use std.collections.{Map}
+use std.net.{TcpStream, NetError, tcp_listen, tcp_accept, tcp_write,
+             tcp_close_stream, tcp_close_listener, tcp_read_request, http_request_path}
 
-// ── Metric Types ──────────────────────────────────────────────────────────────
+// ── Effect ─────────────────────────────────────────────────────────────────────
+
+/// Metric effect — subsumes Send (actor messaging to the registry).
+/// Callers declare only `! Metric`; Send is implied.
+pub effect Metric > Send
+
+// ── Metric types ───────────────────────────────────────────────────────────────
+
 /// Counter: monotonically increasing value.
 /// Use for: request counts, error counts, bytes transferred.
 pub type Counter = struct {
@@ -52,50 +59,291 @@ pub type Histogram = struct {
     count: Int,
 }
 
-// ── Counter operations ────────────────────────────────────────────────────────
-/// Increment a counter by 1.
-/// Builtin: implicitly total (O(1) atomic increment, no loops).
-pub builtin fn counter_inc(name: String, tags: Map[String, String]) -> Unit ! Metric
+// ── Internal: key encoding ─────────────────────────────────────────────────────
 
-/// Increment a counter by n.
-/// Builtin: implicitly total (O(1) atomic increment, no loops).
-pub builtin fn counter_add(name: String, n: Int, tags: Map[String, String]) -> Unit ! Metric
+/// Encode name + sorted tags as a Prometheus label string: `name{k="v",...}`
+/// Used as the map key inside the registry actor.
+fn metric_key(name: String, tags: Map[String, String]) -> String {
+    if tags.is_empty() {
+        name
+    } else {
+        let keys: List[String] = tags.keys().sort();
+        let result: ref String = name.concat("{");
+        let first: ref Bool = true;
+        for k in keys {
+            let v: String = tags.get(k).unwrap_or("");
+            let sep: String = if first { "" } else { "," };
+            result = result.concat(sep).concat(k).concat("=\"").concat(v).concat("\"");
+            first = false
+        }
+        result.concat("}")
+    }
+}
 
-// ── Gauge operations ──────────────────────────────────────────────────────────
-/// Set a gauge to a specific value.
-/// Builtin: implicitly total (O(1) atomic write).
-pub builtin fn gauge_set(name: String, value: Float, tags: Map[String, String]) -> Unit ! Metric
+// ── Internal: histogram helpers ────────────────────────────────────────────────
 
-/// Increment a gauge by delta.
-/// Builtin: implicitly total (O(1) atomic read-modify-write).
-pub builtin fn gauge_inc(name: String, delta: Float, tags: Map[String, String]) -> Unit ! Metric
+fn make_default_buckets() -> List[Bucket] {
+    let result: ref List[Bucket] = [];
+    result.push(Bucket { le: 1.0,    count: 0 });
+    result.push(Bucket { le: 5.0,    count: 0 });
+    result.push(Bucket { le: 10.0,   count: 0 });
+    result.push(Bucket { le: 25.0,   count: 0 });
+    result.push(Bucket { le: 50.0,   count: 0 });
+    result.push(Bucket { le: 100.0,  count: 0 });
+    result.push(Bucket { le: 250.0,  count: 0 });
+    result.push(Bucket { le: 500.0,  count: 0 });
+    result.push(Bucket { le: 1000.0, count: 0 });
+    result.push(Bucket { le: 5000.0, count: 0 });
+    result
+}
 
-/// Decrement a gauge by delta.
-/// Builtin: implicitly total (O(1) atomic read-modify-write).
-pub builtin fn gauge_dec(name: String, delta: Float, tags: Map[String, String]) -> Unit ! Metric
+fn observe_into(h: Histogram, value: Float) -> Histogram {
+    let new_buckets: ref List[Bucket] = [];
+    for b in h.buckets {
+        let new_count: Int = if value <= b.le { b.count + 1 } else { b.count };
+        new_buckets.push(Bucket { le: b.le, count: new_count })
+    }
+    Histogram {
+        name:    h.name,
+        tags:    h.tags,
+        buckets: new_buckets,
+        sum:     h.sum + value,
+        count:   h.count + 1,
+    }
+}
 
-// ── Histogram operations ──────────────────────────────────────────────────────
-/// Record a value in a histogram.
-/// Builtin: implicitly total (bounded bucket scan + atomic increment).
-pub builtin fn histogram_observe(name: String, value: Float, tags: Map[String, String]) -> Unit ! Metric
+// ── Internal: Prometheus text serialization ────────────────────────────────────
 
-/// Time a function and record the duration in a histogram.
-/// Duration is in milliseconds.
-/// Builtin: implicitly total for the wrapper (calls f once, records monotonic clock delta).
-/// The totality of f is the caller's responsibility.
-pub builtin fn histogram_time[T, E](name: String, tags: Map[String, String], f: fn() -> T ! E) -> T ! E + Metric
+fn standard_labels(tags: Map[String, String]) -> String {
+    if tags.is_empty() {
+        ""
+    } else {
+        let keys: List[String] = tags.keys().sort();
+        let result: ref String = "{";
+        let first: ref Bool = true;
+        for k in keys {
+            let v: String = tags.get(k).unwrap_or("");
+            let sep: String = if first { "" } else { "," };
+            result = result.concat(sep).concat(k).concat("=\"").concat(v).concat("\"");
+            first = false
+        }
+        result.concat("}")
+    }
+}
 
-// ── Export ────────────────────────────────────────────────────────────────────
-/// Start a Prometheus metrics exporter on the given address.
-/// Metrics will be available at `http://{addr}/metrics`.
-/// Builtin: implicitly total (binds socket and spawns background thread; call returns O(1)).
-pub builtin fn start_prometheus_exporter(addr: String) -> Result[Unit, String] ! Net + Metric
-// ── Naming conventions ────────────────────────────────────────────────────────
+fn bucket_labels(tags: Map[String, String], le_str: String) -> String {
+    if tags.is_empty() {
+        "{le=\"".concat(le_str).concat("\"}")
+    } else {
+        let keys: List[String] = tags.keys().sort();
+        let result: ref String = "{le=\"".concat(le_str).concat("\"");
+        for k in keys {
+            let v: String = tags.get(k).unwrap_or("");
+            result = result.concat(",").concat(k).concat("=\"").concat(v).concat("\"")
+        }
+        result.concat("}")
+    }
+}
+
+fn format_prometheus(
+    counters:   Map[String, Int],
+    gauges:     Map[String, Float],
+    histograms: Map[String, Histogram],
+) -> String {
+    let result: ref String = "";
+    let counter_keys: List[String] = counters.keys().sort();
+    for key in counter_keys {
+        let v: Int = counters.get(key).unwrap_or(0);
+        result = result.concat(key).concat(" ").concat(v.to_string()).concat("\n")
+    }
+    let gauge_keys: List[String] = gauges.keys().sort();
+    for key in gauge_keys {
+        let v: Float = gauges.get(key).unwrap_or(0.0);
+        result = result.concat(key).concat(" ").concat(v.to_string()).concat("\n")
+    }
+    let hist_keys: List[String] = histograms.keys().sort();
+    for key in hist_keys {
+        match histograms.get(key) {
+            None => {},
+            Some(h) => {
+                for b in h.buckets {
+                    result = result
+                        .concat(h.name).concat("_bucket")
+                        .concat(bucket_labels(h.tags, b.le.to_string()))
+                        .concat(" ").concat(b.count.to_string()).concat("\n")
+                }
+                result = result
+                    .concat(h.name).concat("_bucket")
+                    .concat(bucket_labels(h.tags, "+Inf"))
+                    .concat(" ").concat(h.count.to_string()).concat("\n");
+                result = result
+                    .concat(h.name).concat("_sum")
+                    .concat(standard_labels(h.tags))
+                    .concat(" ").concat(h.sum.to_string()).concat("\n");
+                result = result
+                    .concat(h.name).concat("_count")
+                    .concat(standard_labels(h.tags))
+                    .concat(" ").concat(h.count.to_string()).concat("\n")
+            },
+        }
+    }
+    result
+}
+
+fn http_200(body: String) -> String {
+    "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4; charset=utf-8\r\nContent-Length: "
+        .concat(body.len().to_string())
+        .concat("\r\n\r\n")
+        .concat(body)
+}
+
+fn http_404() -> String {
+    "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n"
+}
+
+// ── Registry actor ─────────────────────────────────────────────────────────────
+
+/// Actor holding all metric state. All writes are async fire-and-forget (pub fn).
+/// Scrape responses are served inline after all prior writes in the mailbox —
+/// the response always reflects a causally consistent snapshot.
+pub actor Metrics {
+    counters:   Map[String, Int]
+    gauges:     Map[String, Float]
+    histograms: Map[String, Histogram]
+
+    /// Increment a counter by 1.
+    pub fn counter_inc(val name: String, val tags: Map[String, String]) {
+        let key: String = metric_key(name, tags);
+        let current: Int = self.counters.get(key).unwrap_or(0);
+        self.counters.insert(key, current + 1)
+    }
+
+    /// Increment a counter by n.
+    pub fn counter_add(val name: String, val n: Int, val tags: Map[String, String]) {
+        let key: String = metric_key(name, tags);
+        let current: Int = self.counters.get(key).unwrap_or(0);
+        self.counters.insert(key, current + n)
+    }
+
+    /// Set a gauge to a specific value.
+    pub fn gauge_set(val name: String, val value: Float, val tags: Map[String, String]) {
+        let key: String = metric_key(name, tags);
+        self.gauges.insert(key, value)
+    }
+
+    /// Increment a gauge by delta.
+    pub fn gauge_inc(val name: String, val delta: Float, val tags: Map[String, String]) {
+        let key: String = metric_key(name, tags);
+        let current: Float = self.gauges.get(key).unwrap_or(0.0);
+        self.gauges.insert(key, current + delta)
+    }
+
+    /// Decrement a gauge by delta.
+    pub fn gauge_dec(val name: String, val delta: Float, val tags: Map[String, String]) {
+        let key: String = metric_key(name, tags);
+        let current: Float = self.gauges.get(key).unwrap_or(0.0);
+        self.gauges.insert(key, current - delta)
+    }
+
+    /// Record an observation in a histogram.
+    /// Creates the histogram with default ms buckets on first observation.
+    pub fn histogram_observe(val name: String, val value: Float, val tags: Map[String, String]) {
+        let key: String = metric_key(name, tags);
+        let h: Histogram = match self.histograms.get(key) {
+            None    => Histogram { name: name, tags: tags, buckets: make_default_buckets(), sum: 0.0, count: 0 },
+            Some(h) => h,
+        };
+        self.histograms.insert(key, observe_into(h, value))
+    }
+
+    /// Serve a Prometheus scrape: format current state and write HTTP/1.1 response.
+    /// Closes the stream after writing.
+    pub fn serve_scrape(val stream: TcpStream) ! Net {
+        let body: String = format_prometheus(self.counters, self.gauges, self.histograms);
+        let _: Result[Unit, NetError] = tcp_write(stream, http_200(body));
+        tcp_close_stream(stream)
+    }
+} with mailbox(unbounded)
+
+// ── Constructor ────────────────────────────────────────────────────────────────
+
+/// Construct a new metrics registry. Call once at program startup.
+/// Pass the returned handle through the call graph, like std.log.Logger.
+pub fn new_metrics() -> Metrics ! Spawn {
+    actor Metrics {
+        counters:   Map[String, Int]::new(),
+        gauges:     Map[String, Float]::new(),
+        histograms: Map[String, Histogram]::new(),
+    }
+}
+
+// ── histogram_record_ms ────────────────────────────────────────────────────────
+
+/// Record a pre-computed duration (milliseconds) in a histogram.
+///
+/// Callers handle timing using std.time.{now, elapsed_ms}:
+///
+///   use std.time.{now, elapsed_ms}
+///   let t0: Instant = now();
+///   let result = do_work();
+///   histogram_record_ms(metrics, "work_duration_ms", elapsed_ms(t0, now()), {});
+///
+/// Effect-polymorphic `histogram_time[T, E]` is not available in pure MVL
+/// user code — effect variables are reserved for builtin declarations.
+pub fn histogram_record_ms(
+    metrics: Metrics,
+    name:    String,
+    ms:      Int,
+    tags:    Map[String, String],
+) -> Unit ! Metric {
+    metrics.histogram_observe(name, ms.to_float(), tags)
+}
+
+// ── Prometheus exporter ────────────────────────────────────────────────────────
+
+/// Bind `host:port` and serve GET /metrics forever.
+/// Each scrape is routed to the registry actor, which responds after processing
+/// all prior metric writes — causally consistent, no extra locking needed.
+/// Non-/metrics paths receive 404. Transient accept errors are swallowed.
+pub partial fn start_prometheus_exporter(
+    metrics: Metrics,
+    host:    String,
+    port:    Int,
+) -> Result[Unit, NetError] ! Net + Metric {
+    match tcp_listen(host, port) {
+        Err(e) => Err(e),
+        Ok(listener) => {
+            while true {
+                match tcp_accept(listener) {
+                    Err(_) => {},
+                    Ok(stream) => {
+                        match tcp_read_request(stream) {
+                            Err(_) => tcp_close_stream(stream),
+                            Ok(raw) => {
+                                let path: String = http_request_path(raw);
+                                if path == "/metrics" {
+                                    metrics.serve_scrape(stream)
+                                } else {
+                                    let _: Result[Unit, NetError] = tcp_write(stream, http_404());
+                                    tcp_close_stream(stream)
+                                }
+                            },
+                        }
+                    },
+                }
+            }
+            tcp_close_listener(listener);
+            Ok(())
+        },
+    }
+}
+
+// ── Naming conventions ─────────────────────────────────────────────────────────
 //
 // Follow Prometheus conventions:
-//   - Snake_case: http_requests_total
-//   - Unit suffix: _seconds, _bytes, _total
-//   - Static names: variation via tags, not metric name
+//   - snake_case names:  http_requests_total
+//   - unit suffix:       _seconds, _bytes, _total
+//   - static names:      variation via tags, not the metric name itself
 //
-// Good: counter_inc("http_requests_total", { "method": "GET", "status": "200" })
-// Bad:  counter_inc("http_requests_" + method, {})  // Dynamic name
+// Good: metrics.counter_inc("http_requests_total", {"method": "GET", "status": "200"})
+// Bad:  metrics.counter_inc("http_requests_" + method, {})  // dynamic name
