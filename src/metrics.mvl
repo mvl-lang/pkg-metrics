@@ -63,7 +63,7 @@ pub type Histogram = struct {
 
 /// Encode name + sorted tags as a Prometheus label string: `name{k="v",...}`
 /// Used as the map key inside the registry actor.
-fn metric_key(name: String, tags: Map[String, String]) -> String {
+total fn metric_key(name: String, tags: Map[String, String]) -> String {
     if tags.is_empty() {
         name
     } else {
@@ -82,7 +82,9 @@ fn metric_key(name: String, tags: Map[String, String]) -> String {
 
 // ── Internal: histogram helpers ────────────────────────────────────────────────
 
-fn make_default_buckets() -> List[Bucket] {
+total fn make_default_buckets() -> List[Bucket]
+    ensures result.len() == 10
+{
     let result: ref List[Bucket] = [];
     result.push(Bucket { le: 1.0,    count: 0 });
     result.push(Bucket { le: 5.0,    count: 0 });
@@ -97,7 +99,11 @@ fn make_default_buckets() -> List[Bucket] {
     result
 }
 
-fn observe_into(h: Histogram, value: Float) -> Histogram {
+total fn observe_into(h: Histogram, value: Float) -> Histogram
+    ensures result.count == h.count + 1
+    ensures result.sum   == h.sum + value
+    ensures result.buckets.len() == h.buckets.len()
+{
     let new_buckets: ref List[Bucket] = [];
     for b in h.buckets {
         let new_count: Int = if value <= b.le { b.count + 1 } else { b.count };
@@ -114,7 +120,7 @@ fn observe_into(h: Histogram, value: Float) -> Histogram {
 
 // ── Internal: Prometheus text serialization ────────────────────────────────────
 
-fn standard_labels(tags: Map[String, String]) -> String {
+total fn standard_labels(tags: Map[String, String]) -> String {
     if tags.is_empty() {
         ""
     } else {
@@ -131,7 +137,7 @@ fn standard_labels(tags: Map[String, String]) -> String {
     }
 }
 
-fn bucket_labels(tags: Map[String, String], le_str: String) -> String {
+total fn bucket_labels(tags: Map[String, String], le_str: String) -> String {
     if tags.is_empty() {
         "{le=\"".concat(le_str).concat("\"}")
     } else {
@@ -145,7 +151,7 @@ fn bucket_labels(tags: Map[String, String], le_str: String) -> String {
     }
 }
 
-fn format_prometheus(
+total fn format_prometheus(
     counters:   Map[String, Int],
     gauges:     Map[String, Float],
     histograms: Map[String, Histogram],
@@ -190,14 +196,14 @@ fn format_prometheus(
     result
 }
 
-fn http_200(body: String) -> String {
+total fn http_200(body: String) -> String {
     "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4; charset=utf-8\r\nContent-Length: "
         .concat(body.len().to_string())
         .concat("\r\n\r\n")
         .concat(body)
 }
 
-fn http_404() -> String {
+total fn http_404() -> String {
     "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n"
 }
 
@@ -269,7 +275,7 @@ pub actor Metrics {
 
 /// Construct a new metrics registry. Call once at program startup.
 /// Pass the returned handle through the call graph, like std.log.Logger.
-pub fn new_metrics() -> Metrics ! Spawn {
+pub total fn new_metrics() -> Metrics ! Spawn {
     actor Metrics {
         counters:   Map[String, Int]::new(),
         gauges:     Map[String, Float]::new(),
@@ -290,7 +296,7 @@ pub fn new_metrics() -> Metrics ! Spawn {
 ///
 /// Effect-polymorphic `histogram_time[T, E]` is not available in pure MVL
 /// user code — effect variables are reserved for builtin declarations.
-pub fn histogram_record_ms(
+pub total fn histogram_record_ms(
     metrics: Metrics,
     name:    String,
     ms:      Int,
